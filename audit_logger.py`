@@ -1,0 +1,87 @@
+import json
+import hashlib
+import os
+from datetime import datetime, timezone
+
+class AuditLogger:
+    """
+    Implements a hash-chained, append-only JSONL audit log.
+    Each entry contains a cryptographic hash of its content and the previous entry's hash.
+    """
+    def __init__(self, log_file="audit_log.jsonl"):
+        self.log_file = log_file
+        self._init_log()
+
+    def _init_log(self):
+        """Ensures the log file exists and is secure."""
+        if not os.path.exists(self.log_file):
+            # Initialize with a genesis block
+            genesis = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "event": "GENESIS",
+                "prev_hash": "0" * 64,
+                "data": {"status": "log_initialized"}
+            }
+            self._write_entry(genesis, is_genesis=True)
+
+        # Ensure restrictive permissions (Linux: 0600)
+        try:
+            os.chmod(self.log_file, 0o600)
+        except OSError:
+            pass # Fallback for non-POSIX environments
+
+    def _get_last_hash(self):
+        """Retrieves the hash of the last entry in the log."""
+        if not os.path.exists(self.log_file) or os.path.getsize(self.log_file) == 0:
+            return "0" * 64
+
+        with open(self.log_file, "rb") as f:
+            f.seek(-1024, os.SEEK_END) # Read last chunk
+            last_line = f.readlines()[-1].decode('utf-8')
+            entry = json.loads(last_line)
+            return entry.get("hash", "0" * 64)
+
+    def _calculate_hash(self, data, prev_hash):
+        """Calculates SHA-256 hash of the current entry and previous hash."""
+        payload = json.dumps(data, sort_keys=True) + prev_hash
+        return hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+    def _write_entry(self, entry, is_genesis=False):
+        """Writes an entry to the log file."""
+        with open(self.log_file, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+
+    def log(self, event, data):
+        """
+        Logs an event with hash-chaining.
+
+        Args:
+            event (str): Event identifier (e.g., "REQUEST", "APPROVAL").
+            data (dict): Detailed event payload.
+        """
+        prev_hash = self._get_last_hash()
+        timestamp = datetime.now(timezone.utc).isoformat()
+
+        # Core entry data
+        entry_data = {
+            "timestamp": timestamp,
+            "event": event,
+            "prev_hash": prev_hash,
+            "data": data
+        }
+
+        # Calculate hash of this entry
+        entry_hash = self._calculate_hash(entry_data, prev_hash)
+
+        # Final entry including its own hash
+        final_entry = {**entry_data, "hash": entry_hash}
+
+        self._write_entry(final_entry)
+        return entry_hash
+
+if __name__ == "__main__":
+    # Basic test
+    logger = AuditLogger("test_audit.jsonl")
+    logger.log("SYSTEM_START", {"user": "supervisor", "mode": "READ_ONLY"})
+    logger.log("TOOL_EXEC", {"tool": "vector_db_query", "risk": "LOW"})
+    print("Audit log test completed. Check test_audit.jsonl")
